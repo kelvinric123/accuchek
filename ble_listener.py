@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-BLE (Bluetooth Low Energy) Listener Script
-Connects to a BLE device and listens for all readings/notifications
+BLE (Bluetooth Low Energy) Listener Script for AccuChek Glucose Meters
+Connects to a BLE device and requests glucose measurements
 
-MINIMAL MODE WORKFLOW (DEFAULT):
+AUTOMATIC DATA RETRIEVAL (RACP):
 =================================
-This script now uses MINIMAL mode to avoid triggering disconnects:
-1. Connects to device with ONE handshake
-2. Does NOT enumerate services (causes disconnects)
-3. Does NOT auto-subscribe (may cause disconnects)
-4. Just keeps connection alive and shows connection status
-5. Shows any data if UUIDs are manually configured
+This script automatically requests stored glucose measurements using RACP:
+1. Connects to the AccuChek device
+2. Subscribes to glucose measurement and RACP characteristics
+3. Sends RACP command to request all stored records
+4. Device sends back glucose measurements via notifications
+5. Measurements are decoded and displayed
 
 SETUP WORKFLOW FOR ACCUCHECK DEVICES:
 ======================================
@@ -21,26 +21,31 @@ SETUP WORKFLOW FOR ACCUCHECK DEVICES:
    $ trust 80:F5:B5:7F:99:0F
    $ exit
 
-2. Activate your AccuCheck (wake it up):
-   - Press Bluetooth/pairing button, OR
-   - Start taking a measurement
+2. Configure config.json:
+   {
+     "mac_address": "80:F5:B5:7F:99:0F",
+     "request_all_records": true,
+     "subscribe_uuids": [
+       "00002a18-0000-1000-8000-00805f9b34fb",  // Glucose Measurement
+       "00002a34-0000-1000-8000-00805f9b34fb",  // Context
+       "00002a52-0000-1000-8000-00805f9b34fb"   // RACP
+     ]
+   }
 
-3. Run this script:
+3. Activate your AccuCheck (wake it up):
+   - Press the data transfer button on the device, OR
+   - Access the Bluetooth menu on the device
+   - Device should show "Data transfer" or Bluetooth icon
+
+4. Run this script:
    $ python3 ble_listener.py
 
-4. Script connects and shows connection status
-
-5. Take a measurement and see how long connection lasts
-
-DEBUGGING DISCONNECTS:
-======================
-If connection drops immediately:
-- Try different timing (activate device JUST before running script)
-- Check if device is connected to phone/other device
-- Set "discover_services": true to see what's available (may disconnect)
-
-Once you find stable connection, add specific UUIDs to config.json:
-"subscribe_uuids": ["uuid1", "uuid2"] to receive data
+5. Script will:
+   - Connect to device
+   - Subscribe to characteristics
+   - Request number of stored records
+   - Request all stored records
+   - Display glucose readings as they come in
 
 ACCUCHECK GLUCOSE SERVICE UUIDS:
 =================================
@@ -55,9 +60,18 @@ Important Characteristics:
 - 00002a51: Glucose Feature (READ) - Device capabilities
 - 00002a08: Date Time (READ/WRITE) - Device time sync
 
-To request stored records, write to 00002a52 (RACP):
+RACP Commands (written to 00002a52):
 - 0x01 0x01 = Report all stored records
-- 0x01 0x06 = Report number of stored records
+- 0x04 0x01 = Report number of stored records
+- 0x03 0x00 = Abort operation
+
+TROUBLESHOOTING:
+================
+If no data is received:
+- Make sure device is in "Data Transfer" mode (check device display)
+- Check that all 3 UUIDs are in subscribe_uuids in config.json
+- Set "request_all_records": true in config.json
+- Device must have stored measurements to transfer
 """
 
 import asyncio
@@ -81,7 +95,11 @@ class BLEListener:
         self.discover_services = self.config.get("discover_services", False)
         self.subscribe_uuids = self.config.get("subscribe_uuids", [])
         self.minimal_mode = self.config.get("minimal_mode", True)
+        self.request_all_records = self.config.get("request_all_records", False)
         self.client = None
+        
+        # RACP characteristic UUID
+        self.RACP_UUID = "00002a52-0000-1000-8000-00805f9b34fb"
         
         if not self.device_address:
             raise ValueError("MAC address not found in config file")
@@ -235,6 +253,57 @@ class BLEListener:
         except Exception as e:
             return f"Decode error: {e}"
     
+    def decode_racp_response(self, data: bytearray):
+        """Decode Record Access Control Point (RACP) response"""
+        try:
+            if len(data) < 2:
+                return "Data too short for RACP response"
+            
+            op_code = data[0]
+            operator = data[1] if len(data) > 1 else 0
+            
+            op_codes = {
+                1: "Report stored records",
+                2: "Delete stored records",
+                3: "Abort operation",
+                4: "Report number of stored records",
+                5: "Number of stored records response",
+                6: "Response code"
+            }
+            
+            result = []
+            result.append(f"Op Code: {op_codes.get(op_code, f'Unknown ({op_code})')}")
+            result.append(f"Operator: {operator}")
+            
+            # If it's a response code (op code 6)
+            if op_code == 6 and len(data) >= 4:
+                request_op_code = data[2]
+                response_code_value = data[3]
+                
+                response_codes = {
+                    1: "Success",
+                    2: "Op code not supported",
+                    3: "Invalid operator",
+                    4: "Operator not supported",
+                    5: "Invalid operand",
+                    6: "No records found",
+                    7: "Abort unsuccessful",
+                    8: "Procedure not completed",
+                    9: "Operand not supported"
+                }
+                
+                result.append(f"Request Op Code: {op_codes.get(request_op_code, f'Unknown ({request_op_code})')}")
+                result.append(f"Response: {response_codes.get(response_code_value, f'Unknown ({response_code_value})')}")
+            
+            # If it's number of records response (op code 5)
+            elif op_code == 5 and len(data) >= 4:
+                num_records = int.from_bytes(data[2:4], byteorder='little')
+                result.append(f"📊 Number of stored records: {num_records}")
+            
+            return "\n  ".join(result)
+        except Exception as e:
+            return f"Decode error: {e}"
+    
     def notification_handler(self, sender: BleakGATTCharacteristic, data: bytearray):
         """Handle notifications/readings from BLE device"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -253,6 +322,12 @@ class BLEListener:
         if sender.uuid.lower() == "00002a18-0000-1000-8000-00805f9b34fb":
             print(f"\n  📊 GLUCOSE MEASUREMENT DECODED:")
             decoded = self.decode_glucose_measurement(data)
+            print(f"  {decoded}")
+        
+        # Try to decode as RACP response
+        elif sender.uuid.lower() == "00002a52-0000-1000-8000-00805f9b34fb":
+            print(f"\n  📋 RACP RESPONSE DECODED:")
+            decoded = self.decode_racp_response(data)
             print(f"  {decoded}")
         
         # Try to decode as UTF-8 if possible
@@ -277,6 +352,50 @@ class BLEListener:
                 pass
         
         print("!" * 60)
+    
+    async def request_all_stored_records(self, client):
+        """Request all stored glucose records via RACP"""
+        try:
+            print(f"\n{'='*60}")
+            print("📋 Requesting All Stored Records via RACP")
+            print(f"{'='*60}\n")
+            
+            # RACP command: Report all stored records
+            # Op Code: 0x01 (Report stored records)
+            # Operator: 0x01 (All records)
+            command = bytearray([0x01, 0x01])
+            
+            print(f"Writing RACP command: {command.hex()} (Report all stored records)")
+            await client.write_gatt_char(self.RACP_UUID, command)
+            print("✓ Command sent successfully!")
+            print("  Waiting for device to send stored glucose measurements...\n")
+            
+            return True
+        except Exception as e:
+            print(f"✗ Failed to request records: {e}")
+            return False
+    
+    async def request_number_of_records(self, client):
+        """Request number of stored glucose records via RACP"""
+        try:
+            print(f"\n{'='*60}")
+            print("📊 Requesting Number of Stored Records via RACP")
+            print(f"{'='*60}\n")
+            
+            # RACP command: Report number of stored records
+            # Op Code: 0x04 (Report number of stored records)
+            # Operator: 0x01 (All records)
+            command = bytearray([0x04, 0x01])
+            
+            print(f"Writing RACP command: {command.hex()} (Report number of records)")
+            await client.write_gatt_char(self.RACP_UUID, command)
+            print("✓ Command sent successfully!")
+            print("  Waiting for response...\n")
+            
+            return True
+        except Exception as e:
+            print(f"✗ Failed to request number of records: {e}")
+            return False
     
     async def wait_for_device_ready(self, device_address, max_attempts=10):
         """Wait for device to become discoverable/connectable"""
@@ -371,21 +490,36 @@ class BLEListener:
                         except Exception as e:
                             print(f"✗ ({e})")
                 
+                # If RACP is subscribed and request_all_records is enabled, request data
+                if self.RACP_UUID in [u.lower() for u in self.subscribe_uuids] and self.request_all_records:
+                    await asyncio.sleep(1)  # Give subscriptions time to settle
+                    
+                    # First, request number of records
+                    await self.request_number_of_records(client)
+                    await asyncio.sleep(2)  # Wait for response
+                    
+                    # Then request all records
+                    await self.request_all_stored_records(client)
+                    await asyncio.sleep(2)  # Give device time to prepare data
+                
                 print(f"\n{'='*60}")
-                print("📡 PASSIVE LISTENING MODE")
+                print("📡 LISTENING FOR DATA")
                 print(f"{'='*60}\n")
                 
                 if subscribed_count > 0:
                     print(f"✓ Subscribed to {subscribed_count} characteristic(s)")
                     print("  Any data from subscribed characteristics will appear below.\n")
+                    
+                    if self.request_all_records and self.RACP_UUID in [u.lower() for u in self.subscribe_uuids]:
+                        print("✓ RACP requests sent - waiting for glucose data...")
+                        print("  Device will send stored measurements via notifications.\n")
                 else:
                     print("⚠ No characteristics subscribed.")
                     print("  Connection is idle. Device may not send unsolicited data.\n")
                     print("  To subscribe to specific UUIDs, add them to config.json:")
-                    print('    "subscribe_uuids": ["00002a52-0000-1000-8000-00805f9b34fb"]\n')
+                    print('    "subscribe_uuids": ["00002a18-...", "00002a52-..."]\n')
                 
                 print("Keeping connection alive. Press Ctrl+C to stop.")
-                print("To discover services later, set 'discover_services': true in config\n")
                 print(f"{'='*60}\n")
                 
                 # Just keep connection alive
