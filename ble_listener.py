@@ -98,8 +98,10 @@ class BLEListener:
         self.request_all_records = self.config.get("request_all_records", False)
         self.client = None
         
-        # RACP characteristic UUID
+        # RACP characteristic UUID (for subscription)
         self.RACP_UUID = "00002a52-0000-1000-8000-00805f9b34fb"
+        # RACP handle for write operations
+        self.RACP_HANDLE = 0x000f
         
         if not self.device_address:
             raise ValueError("MAC address not found in config file")
@@ -253,6 +255,23 @@ class BLEListener:
         except Exception as e:
             return f"Decode error: {e}"
     
+    def save_glucose_reading_to_file(self, glucose_value, units, timestamp, seq_num=None, filename="glucose_readings.txt"):
+        """Save glucose reading to a file"""
+        try:
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            with open(filename, 'a', encoding='utf-8') as f:
+                if seq_num is not None:
+                    f.write(f"[{current_time}] Reading #{seq_num}: {glucose_value} {units} (Measured: {timestamp})\n")
+                else:
+                    f.write(f"[{current_time}] Reading: {glucose_value} {units} (Measured: {timestamp})\n")
+            
+            print(f"  💾 Saved to {filename}")
+            return True
+        except Exception as e:
+            print(f"  ⚠ Failed to save reading to file: {e}")
+            return False
+    
     def decode_racp_response(self, data: bytearray):
         """Decode Record Access Control Point (RACP) response"""
         try:
@@ -323,6 +342,50 @@ class BLEListener:
             print(f"\n  📊 GLUCOSE MEASUREMENT DECODED:")
             decoded = self.decode_glucose_measurement(data)
             print(f"  {decoded}")
+            
+            # Extract and save glucose reading to file
+            try:
+                # Parse the glucose data
+                if len(data) >= 10:
+                    flags = data[0]
+                    concentration_and_type_present = bool(flags & 0x02)
+                    concentration_units = "mmol/L" if (flags & 0x04) else "mg/dL"
+                    time_offset_present = bool(flags & 0x01)
+                    
+                    # Sequence number
+                    seq_num = int.from_bytes(data[1:3], byteorder='little')
+                    
+                    # Timestamp
+                    year = int.from_bytes(data[3:5], byteorder='little')
+                    month = data[5]
+                    day = data[6]
+                    hour = data[7]
+                    minute = data[8]
+                    second = data[9]
+                    timestamp_str = f"{year}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}:{second:02d}"
+                    
+                    # Extract glucose value if present
+                    offset = 10
+                    if time_offset_present and len(data) >= offset + 2:
+                        offset += 2
+                    
+                    if concentration_and_type_present and len(data) >= offset + 3:
+                        glucose_raw = int.from_bytes(data[offset:offset+2], byteorder='little')
+                        
+                        # Decode SFLOAT
+                        exponent = (glucose_raw >> 12) & 0x0F
+                        if exponent >= 0x08:
+                            exponent = -(0x10 - exponent)
+                        mantissa = glucose_raw & 0x0FFF
+                        if mantissa >= 0x0800:
+                            mantissa = -(0x1000 - mantissa)
+                        
+                        glucose_value = mantissa * (10 ** exponent)
+                        
+                        # Save to file
+                        self.save_glucose_reading_to_file(glucose_value, concentration_units, timestamp_str, seq_num)
+            except Exception as e:
+                print(f"  ⚠ Could not save reading to file: {e}")
         
         # Try to decode as RACP response
         elif sender.uuid.lower() == "00002a52-0000-1000-8000-00805f9b34fb":
@@ -366,7 +429,7 @@ class BLEListener:
             command = bytearray([0x01, 0x01])
             
             print(f"Writing RACP command: {command.hex()} (Report all stored records)")
-            await client.write_gatt_char(self.RACP_UUID, command)
+            await client.write_gatt_char(self.RACP_HANDLE, command)
             print("✓ Command sent successfully!")
             print("  Waiting for device to send stored glucose measurements...\n")
             
@@ -388,7 +451,7 @@ class BLEListener:
             command = bytearray([0x04, 0x01])
             
             print(f"Writing RACP command: {command.hex()} (Report number of records)")
-            await client.write_gatt_char(self.RACP_UUID, command)
+            await client.write_gatt_char(self.RACP_HANDLE, command)
             print("✓ Command sent successfully!")
             print("  Waiting for response...\n")
             
