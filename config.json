@@ -5,6 +5,10 @@
   "wait_for_device": true,
   "minimal_mode": true,
   "discover_services": false,
-  "subscribe_uuids": []
+  "subscribe_uuids": [
+    "00002a18-0000-1000-8000-00805f9b34fb",
+    "00002a34-0000-1000-8000-00805f9b34fb",
+    "00002a52-0000-1000-8000-00805f9b34fb"
+  ]
 }
 

@@ -41,6 +41,23 @@ If connection drops immediately:
 
 Once you find stable connection, add specific UUIDs to config.json:
 "subscribe_uuids": ["uuid1", "uuid2"] to receive data
+
+ACCUCHECK GLUCOSE SERVICE UUIDS:
+=================================
+Based on Bluetooth Glucose Profile specification:
+
+Service: 00001808-0000-1000-8000-00805f9b34fb (Glucose Service)
+
+Important Characteristics:
+- 00002a18: Glucose Measurement (NOTIFY) - Main glucose readings
+- 00002a34: Glucose Measurement Context (NOTIFY) - Additional context
+- 00002a52: Record Access Control Point (INDICATE/WRITE) - Request stored records
+- 00002a51: Glucose Feature (READ) - Device capabilities
+- 00002a08: Date Time (READ/WRITE) - Device time sync
+
+To request stored records, write to 00002a52 (RACP):
+- 0x01 0x01 = Report all stored records
+- 0x01 0x06 = Report number of stored records
 """
 
 import asyncio
@@ -146,6 +163,78 @@ class BLEListener:
         print("Attempting to connect anyway...")
         return self.device_address
     
+    def decode_glucose_measurement(self, data: bytearray):
+        """Decode Glucose Measurement characteristic (0x2A18)"""
+        try:
+            if len(data) < 10:
+                return "Data too short for glucose measurement"
+            
+            # Byte 0: Flags
+            flags = data[0]
+            time_offset_present = bool(flags & 0x01)
+            concentration_and_type_present = bool(flags & 0x02)
+            concentration_units = "mmol/L" if (flags & 0x04) else "mg/dL"
+            status_annunciation_present = bool(flags & 0x08)
+            context_info_follows = bool(flags & 0x10)
+            
+            result = []
+            result.append(f"Flags: 0x{flags:02x}")
+            result.append(f"  Units: {concentration_units}")
+            result.append(f"  Context follows: {context_info_follows}")
+            
+            # Bytes 1-2: Sequence Number
+            seq_num = int.from_bytes(data[1:3], byteorder='little')
+            result.append(f"Sequence Number: {seq_num}")
+            
+            # Bytes 3-9: Base Time (year, month, day, hour, min, sec)
+            year = int.from_bytes(data[3:5], byteorder='little')
+            month = data[5]
+            day = data[6]
+            hour = data[7]
+            minute = data[8]
+            second = data[9]
+            result.append(f"Timestamp: {year}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}:{second:02d}")
+            
+            offset = 10
+            
+            # Time Offset (optional, 2 bytes)
+            if time_offset_present and len(data) >= offset + 2:
+                time_offset = int.from_bytes(data[offset:offset+2], byteorder='little', signed=True)
+                result.append(f"Time Offset: {time_offset} minutes")
+                offset += 2
+            
+            # Glucose Concentration (optional, 3 bytes: 2 for value, 1 for type/location)
+            if concentration_and_type_present and len(data) >= offset + 3:
+                # SFLOAT format (2 bytes)
+                glucose_raw = int.from_bytes(data[offset:offset+2], byteorder='little')
+                
+                # Decode SFLOAT: 4-bit exponent, 12-bit mantissa
+                exponent = (glucose_raw >> 12) & 0x0F
+                if exponent >= 0x08:  # negative exponent
+                    exponent = -(0x10 - exponent)
+                mantissa = glucose_raw & 0x0FFF
+                if mantissa >= 0x0800:  # negative mantissa
+                    mantissa = -(0x1000 - mantissa)
+                
+                glucose_value = mantissa * (10 ** exponent)
+                
+                type_sample_location = data[offset + 2]
+                sample_type = (type_sample_location >> 4) & 0x0F
+                sample_location = type_sample_location & 0x0F
+                
+                result.append(f"🩸 GLUCOSE: {glucose_value} {concentration_units}")
+                result.append(f"Sample Type: {sample_type}, Location: {sample_location}")
+                offset += 3
+            
+            # Status Annunciation (optional, 2 bytes)
+            if status_annunciation_present and len(data) >= offset + 2:
+                status = int.from_bytes(data[offset:offset+2], byteorder='little')
+                result.append(f"Status: 0x{status:04x}")
+            
+            return "\n  ".join(result)
+        except Exception as e:
+            return f"Decode error: {e}"
+    
     def notification_handler(self, sender: BleakGATTCharacteristic, data: bytearray):
         """Handle notifications/readings from BLE device"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -159,6 +248,12 @@ class BLEListener:
         print(f"  Data (hex): {data.hex()}")
         print(f"  Data (bytes): {data}")
         print(f"  Data (raw): {list(data)}")
+        
+        # Try to decode as glucose measurement
+        if sender.uuid.lower() == "00002a18-0000-1000-8000-00805f9b34fb":
+            print(f"\n  📊 GLUCOSE MEASUREMENT DECODED:")
+            decoded = self.decode_glucose_measurement(data)
+            print(f"  {decoded}")
         
         # Try to decode as UTF-8 if possible
         try:
