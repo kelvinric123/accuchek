@@ -7,6 +7,7 @@ Connects to a BLE device and listens for all readings/notifications
 import asyncio
 import json
 import os
+import subprocess
 from datetime import datetime
 from bleak import BleakClient, BleakScanner
 from bleak.backends.characteristic import BleakGATTCharacteristic
@@ -32,6 +33,39 @@ class BLEListener:
         
         with open(config_file, 'r') as f:
             return json.load(f)
+    
+    def check_pairing_status(self, device_address):
+        """Check if device is already paired using bluetoothctl"""
+        try:
+            result = subprocess.run(
+                ['bluetoothctl', 'info', device_address],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            if result.returncode == 0:
+                output = result.stdout
+                paired = "Paired: yes" in output
+                trusted = "Trusted: yes" in output
+                connected = "Connected: yes" in output
+                
+                print(f"\nDevice Pairing Status:")
+                print(f"  Paired: {'✓ Yes' if paired else '✗ No'}")
+                print(f"  Trusted: {'✓ Yes' if trusted else '✗ No'}")
+                print(f"  Connected: {'✓ Yes' if connected else '✗ No'}")
+                
+                return paired, trusted, connected
+            else:
+                print(f"\nCouldn't retrieve pairing status (device may not be paired yet)")
+                return False, False, False
+                
+        except FileNotFoundError:
+            print(f"\nNote: bluetoothctl not found, skipping pairing status check")
+            return None, None, None
+        except Exception as e:
+            print(f"\nNote: Could not check pairing status: {e}")
+            return None, None, None
     
     async def scan_for_device(self):
         """Scan for BLE devices"""
@@ -112,12 +146,16 @@ class BLEListener:
         
         device_address = device.address if isinstance(device, type(device)) and hasattr(device, 'address') else device
         
+        # Check pairing status before connecting
+        self.check_pairing_status(device_address)
+        
         print(f"\n{'='*60}")
         print(f"Connecting to device: {device_address}")
         print(f"{'='*60}\n")
         
         try:
-            async with BleakClient(device_address) as client:
+            # Increase timeout for devices that need pairing
+            async with BleakClient(device_address, timeout=30.0) as client:
                 self.client = client
                 
                 print(f"✓ Connected successfully!")
@@ -180,7 +218,33 @@ class BLEListener:
         except asyncio.CancelledError:
             print("\n\nConnection cancelled by user.")
         except Exception as e:
-            print(f"\n\n✗ Error: {e}")
+            print(f"\n\n✗ Connection Error: {e}")
+            print(f"Error Type: {type(e).__name__}")
+            
+            # Provide helpful troubleshooting info
+            print(f"\n{'='*60}")
+            print("TROUBLESHOOTING:")
+            print(f"{'='*60}")
+            print("\nIf you're getting pairing/authentication errors, try:")
+            print("\n1. Remove existing pairing (if any):")
+            print(f"   bluetoothctl")
+            print(f"   remove {device_address}")
+            print(f"   exit")
+            print("\n2. Pair the device manually:")
+            print(f"   bluetoothctl")
+            print(f"   scan on")
+            print(f"   (wait to see your device)")
+            print(f"   scan off")
+            print(f"   pair {device_address}")
+            print(f"   (enter PIN if prompted)")
+            print(f"   trust {device_address}")
+            print(f"   exit")
+            print("\n3. Then run this script again")
+            print(f"\nOther common issues:")
+            print("- Make sure the device is in pairing mode")
+            print("- Make sure the device isn't connected to another device")
+            print("- Try running with sudo if permission errors occur")
+            print(f"{'='*60}\n")
             raise
 
 
