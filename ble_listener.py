@@ -49,7 +49,11 @@ class BLEListener:
         for i, device in enumerate(devices, 1):
             print(f"{i}. Name: {device.name or 'Unknown'}")
             print(f"   Address: {device.address}")
-            print(f"   RSSI: {device.rssi} dBm")
+            rssi = getattr(device, 'rssi', None)
+            if rssi is not None:
+                print(f"   RSSI: {rssi} dBm")
+            else:
+                print(f"   RSSI: Not available")
             print()
         
         # Try to find device by MAC address or name
