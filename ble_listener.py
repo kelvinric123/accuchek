@@ -2,6 +2,34 @@
 """
 BLE (Bluetooth Low Energy) Listener Script
 Connects to a BLE device and listens for all readings/notifications
+
+USAGE WORKFLOW FOR ACCUCHECK DEVICES:
+=====================================
+1. Make sure device is paired and trusted (one-time setup):
+   $ bluetoothctl
+   $ scan on
+   $ scan off
+   $ pair 80:F5:B5:7F:99:0F
+   $ trust 80:F5:B5:7F:99:0F
+   $ exit
+
+2. Activate your AccuCheck device (put it in active/pairing mode)
+   - Press the Bluetooth button on your device
+   - Or start taking a measurement
+   - Device must be AWAKE to connect
+
+3. Run this script:
+   $ python3 ble_listener.py
+
+4. Once connected, the script will listen for:
+   - New glucose measurements
+   - Historical data sync
+   - Any notifications from the device
+
+5. Take a measurement or sync data - readings will appear automatically
+
+IMPORTANT: The device sleeps when idle. You must wake it up before 
+           running the script, or the script will wait for it to wake up.
 """
 
 import asyncio
@@ -21,6 +49,7 @@ class BLEListener:
         self.device_address = self.config.get("mac_address")
         self.device_name = self.config.get("device_name", None)
         self.scan_timeout = self.config.get("scan_timeout", 10)
+        self.wait_for_device = self.config.get("wait_for_device", True)
         self.client = None
         
         if not self.device_address:
@@ -136,6 +165,34 @@ class BLEListener:
         
         print("-" * 60)
     
+    async def wait_for_device_ready(self, device_address, max_attempts=10):
+        """Wait for device to become discoverable/connectable"""
+        print(f"\n{'='*60}")
+        print("⏳ Waiting for device to become active...")
+        print(f"{'='*60}\n")
+        print("IMPORTANT: Make sure your AccuChek device is:")
+        print("  • In pairing/transmission mode (follow device instructions)")
+        print("  • Or actively taking a measurement")
+        print("  • Device must be AWAKE to connect\n")
+        
+        for attempt in range(1, max_attempts + 1):
+            print(f"Attempt {attempt}/{max_attempts}: Scanning for active device...")
+            
+            devices = await BleakScanner.discover(timeout=5)
+            for device in devices:
+                if device.address.lower() == device_address.lower():
+                    print(f"✓ Device found and active: {device.name or 'Unknown'}")
+                    return True
+            
+            if attempt < max_attempts:
+                print(f"  Device not found yet, waiting 3 seconds...")
+                print(f"  (Make sure device is in active/pairing mode!)\n")
+                await asyncio.sleep(3)
+        
+        print(f"\n⚠ Device not found after {max_attempts} attempts")
+        print("The device may be sleeping. Please activate it and try again.")
+        return False
+    
     async def connect_and_listen(self):
         """Connect to BLE device and listen for notifications"""
         device = await self.scan_for_device()
@@ -147,7 +204,29 @@ class BLEListener:
         device_address = device.address if isinstance(device, type(device)) and hasattr(device, 'address') else device
         
         # Check pairing status before connecting
-        self.check_pairing_status(device_address)
+        paired, trusted, connected = self.check_pairing_status(device_address)
+        
+        # If device is not currently connected/discoverable, wait for it
+        if connected == False or paired == False:
+            print(f"\n{'='*60}")
+            print("⚠ DEVICE NOT CURRENTLY ACTIVE")
+            print(f"{'='*60}")
+            print("\nYour device needs to be AWAKE and in active mode to connect.")
+            print("\nPlease do ONE of the following:")
+            print("  1. Press the pairing/Bluetooth button on your AccuChek")
+            print("  2. Start taking a measurement")
+            print("  3. Access the device menu to keep it awake")
+            print("\n📍 Activate your device NOW...")
+            print(f"{'='*60}\n")
+            
+            # Give user time to activate device
+            print("Waiting 5 seconds for you to activate the device...")
+            await asyncio.sleep(5)
+            
+            # Wait for device to appear in scan
+            if not await self.wait_for_device_ready(device_address):
+                print("\n✗ Could not find active device. Exiting.")
+                return
         
         print(f"\n{'='*60}")
         print(f"Connecting to device: {device_address}")
@@ -208,12 +287,25 @@ class BLEListener:
                     print()
                 
                 print(f"{'='*60}")
-                print("Listening for readings... (Press Ctrl+C to stop)")
+                print("📡 Listening for readings... (Press Ctrl+C to stop)")
                 print(f"{'='*60}\n")
+                print("✓ Connection established and subscribed to notifications")
+                print("\nNow you can:")
+                print("  • Take a glucose measurement on your AccuChek")
+                print("  • The reading will automatically appear here")
+                print("  • Keep this script running to capture measurements")
+                print(f"\n{'='*60}\n")
                 
                 # Keep the connection alive
-                while True:
-                    await asyncio.sleep(1)
+                try:
+                    while True:
+                        # Check if still connected
+                        if not client.is_connected:
+                            print("\n⚠ Device disconnected (may have gone to sleep)")
+                            break
+                        await asyncio.sleep(1)
+                except Exception as e:
+                    print(f"\n⚠ Connection lost: {e}")
                     
         except asyncio.CancelledError:
             print("\n\nConnection cancelled by user.")
