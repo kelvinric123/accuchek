@@ -526,19 +526,48 @@ class GlucoseMeterListener:
             print(f"  3. Make sure device isn't connected elsewhere")
         
         except Exception as e:
-            print(f"\n❌ Error: {e}")
-            print(f"   Type: {type(e).__name__}")
+            error_type = type(e).__name__
+            error_msg = str(e)
             
-            print(f"\n{'='*60}")
-            print("TROUBLESHOOTING:")
-            print(f"{'='*60}")
-            print(f"\n1. Ensure device is paired:")
-            print(f"   bluetoothctl pair {self.device_address}")
-            print(f"   bluetoothctl trust {self.device_address}")
-            print(f"\n2. Make sure device is awake and in pairing mode")
-            print(f"\n3. Check that device supports Glucose Service (0x1808)")
-            print(f"\n4. Some devices require time sync before sending data")
-            print(f"{'='*60}\n")
+            print(f"\n❌ Error: {error_msg}")
+            print(f"   Type: {error_type}")
+            
+            # Special handling for BleakDBusError
+            if "DBus" in error_type or "DBus" in error_msg or "org.bluez" in error_msg:
+                print(f"\n{'='*60}")
+                print("⚠️  BLEAKDBUSERROR DETECTED!")
+                print(f"{'='*60}")
+                print("\nThis is a Linux Bluetooth/DBus communication error.")
+                print("\nQUICK FIXES (try in order):")
+                print(f"\n1. Restart Bluetooth service:")
+                print(f"   sudo systemctl restart bluetooth")
+                print(f"\n2. Power cycle Bluetooth adapter:")
+                print(f"   bluetoothctl power off")
+                print(f"   bluetoothctl power on")
+                print(f"\n3. Add your user to bluetooth group:")
+                print(f"   sudo usermod -aG bluetooth $(whoami)")
+                print(f"   Then LOG OUT and LOG BACK IN")
+                print(f"\n4. Run the automated fix script:")
+                print(f"   chmod +x fix_bluetooth.sh")
+                print(f"   ./fix_bluetooth.sh")
+                print(f"\n5. If all else fails, run with sudo:")
+                print(f"   sudo python3 gm_listener.py")
+                print(f"\n6. Check if device is still connected elsewhere:")
+                print(f"   bluetoothctl info {self.device_address}")
+                print(f"   If connected, disconnect first:")
+                print(f"   bluetoothctl disconnect {self.device_address}")
+                print(f"{'='*60}\n")
+            else:
+                print(f"\n{'='*60}")
+                print("TROUBLESHOOTING:")
+                print(f"{'='*60}")
+                print(f"\n1. Ensure device is paired:")
+                print(f"   bluetoothctl pair {self.device_address}")
+                print(f"   bluetoothctl trust {self.device_address}")
+                print(f"\n2. Make sure device is awake and in pairing mode")
+                print(f"\n3. Check that device supports Glucose Service (0x1808)")
+                print(f"\n4. Some devices require time sync before sending data")
+                print(f"{'='*60}\n")
 
 
 async def main():
