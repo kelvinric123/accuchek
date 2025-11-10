@@ -2,6 +2,7 @@
   "mac_address": "80:F5:B5:7F:99:0F",
   "device_name": "accuchekgit",
   "scan_timeout": 10,
-  "wait_for_device": true
+  "wait_for_device": true,
+  "discover_services": false
 }
 

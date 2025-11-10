@@ -50,6 +50,7 @@ class BLEListener:
         self.device_name = self.config.get("device_name", None)
         self.scan_timeout = self.config.get("scan_timeout", 10)
         self.wait_for_device = self.config.get("wait_for_device", True)
+        self.discover_services = self.config.get("discover_services", True)
         self.client = None
         
         if not self.device_address:
@@ -239,60 +240,102 @@ class BLEListener:
                 
                 print(f"✓ Connected successfully!")
                 print(f"  Device: {client.address}")
-                print(f"  MTU Size: {client.mtu_size}")
-                print()
                 
-                # Get all services and characteristics
-                print(f"{'='*60}")
-                print("Device Services and Characteristics:")
-                print(f"{'='*60}\n")
+                # MTU size may not be available immediately
+                try:
+                    print(f"  MTU Size: {client.mtu_size}")
+                except Exception as e:
+                    print(f"  MTU Size: Could not read ({e})")
                 
-                services = await client.get_services()
+                print("\n⏳ Waiting for connection to stabilize...")
+                await asyncio.sleep(2)  # Give device time to stabilize
+                
+                subscribed_count = 0
+                
+                # Optionally discover and subscribe to services
+                if self.discover_services:
+                    # Get all services and characteristics
+                    print(f"\n{'='*60}")
+                    print("Device Services and Characteristics:")
+                    print(f"{'='*60}\n")
+                    
+                    try:
+                        services = await client.get_services()
+                    except Exception as e:
+                        print(f"⚠ Warning: Could not read all services: {e}")
+                        print("Attempting to continue anyway...\n")
+                        services = []
+                else:
+                    print(f"\n{'='*60}")
+                    print("Skipping service discovery (discover_services=false in config)")
+                    print(f"{'='*60}\n")
+                    services = []
+                
                 for service in services:
-                    print(f"Service UUID: {service.uuid}")
-                    print(f"  Description: {service.description}")
-                    print(f"  Characteristics:")
-                    
-                    for char in service.characteristics:
-                        props = []
-                        if "read" in char.properties:
-                            props.append("READ")
-                        if "write" in char.properties:
-                            props.append("WRITE")
-                        if "notify" in char.properties:
-                            props.append("NOTIFY")
-                        if "indicate" in char.properties:
-                            props.append("INDICATE")
+                    try:
+                        print(f"Service UUID: {service.uuid}")
+                        print(f"  Description: {service.description}")
+                        print(f"  Characteristics:")
                         
-                        print(f"    - UUID: {char.uuid}")
-                        print(f"      Handle: {char.handle}")
-                        print(f"      Properties: {', '.join(props) if props else 'None'}")
-                        
-                        # Subscribe to notifications if available
-                        if "notify" in char.properties:
+                        for char in service.characteristics:
                             try:
-                                await client.start_notify(char.uuid, self.notification_handler)
-                                print(f"      ✓ Subscribed to notifications")
+                                props = []
+                                if "read" in char.properties:
+                                    props.append("READ")
+                                if "write" in char.properties:
+                                    props.append("WRITE")
+                                if "notify" in char.properties:
+                                    props.append("NOTIFY")
+                                if "indicate" in char.properties:
+                                    props.append("INDICATE")
+                                
+                                print(f"    - UUID: {char.uuid}")
+                                print(f"      Handle: {char.handle}")
+                                print(f"      Properties: {', '.join(props) if props else 'None'}")
+                                
+                                # Subscribe to notifications if available
+                                if "notify" in char.properties:
+                                    try:
+                                        await client.start_notify(char.uuid, self.notification_handler)
+                                        print(f"      ✓ Subscribed to notifications")
+                                        subscribed_count += 1
+                                        await asyncio.sleep(0.1)  # Small delay between subscriptions
+                                    except Exception as e:
+                                        print(f"      ✗ Failed to subscribe: {e}")
+                                
+                                # Subscribe to indications if available
+                                if "indicate" in char.properties:
+                                    try:
+                                        await client.start_notify(char.uuid, self.notification_handler)
+                                        print(f"      ✓ Subscribed to indications")
+                                        subscribed_count += 1
+                                        await asyncio.sleep(0.1)  # Small delay between subscriptions
+                                    except Exception as e:
+                                        print(f"      ✗ Failed to subscribe: {e}")
                             except Exception as e:
-                                print(f"      ✗ Failed to subscribe: {e}")
+                                print(f"    ⚠ Error reading characteristic: {e}")
                         
-                        # Subscribe to indications if available
-                        if "indicate" in char.properties:
-                            try:
-                                await client.start_notify(char.uuid, self.notification_handler)
-                                print(f"      ✓ Subscribed to indications")
-                            except Exception as e:
-                                print(f"      ✗ Failed to subscribe: {e}")
-                    
-                    print()
+                        print()
+                    except Exception as e:
+                        print(f"  ⚠ Error reading service: {e}\n")
+                
+                if subscribed_count == 0:
+                    print("⚠ Warning: No characteristics subscribed. Device may not send notifications.")
+                    print("   This could be normal if device requires specific commands first.\n")
                 
                 print(f"{'='*60}")
                 print("📡 Listening for readings... (Press Ctrl+C to stop)")
                 print(f"{'='*60}\n")
-                print("✓ Connection established and subscribed to notifications")
+                
+                if subscribed_count > 0:
+                    print(f"✓ Connection established with {subscribed_count} notification(s) subscribed")
+                else:
+                    print("✓ Connection established (passive listening mode)")
+                    print("   Note: No notifications subscribed - may need device-specific commands")
+                
                 print("\nNow you can:")
                 print("  • Take a glucose measurement on your AccuChek")
-                print("  • The reading will automatically appear here")
+                print("  • The reading will automatically appear here (if device sends it)")
                 print("  • Keep this script running to capture measurements")
                 print(f"\n{'='*60}\n")
                 
@@ -309,6 +352,26 @@ class BLEListener:
                     
         except asyncio.CancelledError:
             print("\n\nConnection cancelled by user.")
+        except EOFError as e:
+            print(f"\n\n✗ Connection Lost (EOFError): Device disconnected unexpectedly")
+            print(f"\n{'='*60}")
+            print("POSSIBLE CAUSES FOR ACCUCHECK DEVICES:")
+            print(f"{'='*60}")
+            print("\n1. Device has a very short connection timeout")
+            print("   - AccuCheck may disconnect if idle for too long")
+            print("   - Try taking a measurement immediately after connecting\n")
+            print("2. Device requires time/date sync or specific handshake")
+            print("   - Some glucose meters need to sync time first")
+            print("   - May need to use manufacturer's app first\n")
+            print("3. Device may be connected to another device/app")
+            print("   - Make sure AccuCheck app is closed on phone")
+            print("   - Make sure no other Bluetooth connections are active\n")
+            print("4. Try this sequence:")
+            print("   a. Put device in pairing mode")
+            print("   b. Start this script")
+            print("   c. IMMEDIATELY take a glucose measurement")
+            print("   d. Device should stay connected during measurement\n")
+            print(f"{'='*60}\n")
         except Exception as e:
             print(f"\n\n✗ Connection Error: {e}")
             print(f"Error Type: {type(e).__name__}")
