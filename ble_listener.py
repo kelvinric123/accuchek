@@ -3,33 +3,44 @@
 BLE (Bluetooth Low Energy) Listener Script
 Connects to a BLE device and listens for all readings/notifications
 
-USAGE WORKFLOW FOR ACCUCHECK DEVICES:
-=====================================
-1. Make sure device is paired and trusted (one-time setup):
+MINIMAL MODE WORKFLOW (DEFAULT):
+=================================
+This script now uses MINIMAL mode to avoid triggering disconnects:
+1. Connects to device with ONE handshake
+2. Does NOT enumerate services (causes disconnects)
+3. Does NOT auto-subscribe (may cause disconnects)
+4. Just keeps connection alive and shows connection status
+5. Shows any data if UUIDs are manually configured
+
+SETUP WORKFLOW FOR ACCUCHECK DEVICES:
+======================================
+1. Pair device once (one-time setup):
    $ bluetoothctl
    $ scan on
-   $ scan off
    $ pair 80:F5:B5:7F:99:0F
    $ trust 80:F5:B5:7F:99:0F
    $ exit
 
-2. Activate your AccuCheck device (put it in active/pairing mode)
-   - Press the Bluetooth button on your device
-   - Or start taking a measurement
-   - Device must be AWAKE to connect
+2. Activate your AccuCheck (wake it up):
+   - Press Bluetooth/pairing button, OR
+   - Start taking a measurement
 
 3. Run this script:
    $ python3 ble_listener.py
 
-4. Once connected, the script will listen for:
-   - New glucose measurements
-   - Historical data sync
-   - Any notifications from the device
+4. Script connects and shows connection status
 
-5. Take a measurement or sync data - readings will appear automatically
+5. Take a measurement and see how long connection lasts
 
-IMPORTANT: The device sleeps when idle. You must wake it up before 
-           running the script, or the script will wait for it to wake up.
+DEBUGGING DISCONNECTS:
+======================
+If connection drops immediately:
+- Try different timing (activate device JUST before running script)
+- Check if device is connected to phone/other device
+- Set "discover_services": true to see what's available (may disconnect)
+
+Once you find stable connection, add specific UUIDs to config.json:
+"subscribe_uuids": ["uuid1", "uuid2"] to receive data
 """
 
 import asyncio
@@ -50,7 +61,9 @@ class BLEListener:
         self.device_name = self.config.get("device_name", None)
         self.scan_timeout = self.config.get("scan_timeout", 10)
         self.wait_for_device = self.config.get("wait_for_device", True)
-        self.discover_services = self.config.get("discover_services", True)
+        self.discover_services = self.config.get("discover_services", False)
+        self.subscribe_uuids = self.config.get("subscribe_uuids", [])
+        self.minimal_mode = self.config.get("minimal_mode", True)
         self.client = None
         
         if not self.device_address:
@@ -137,11 +150,15 @@ class BLEListener:
         """Handle notifications/readings from BLE device"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         
-        print(f"\n[{timestamp}] Notification from {sender.uuid}")
+        print(f"\n{'!'*60}")
+        print(f"🔔 DATA RECEIVED!")
+        print(f"{'!'*60}")
+        print(f"[{timestamp}] Notification from {sender.uuid}")
         print(f"  Characteristic UUID: {sender.uuid}")
         print(f"  Handle: {sender.handle}")
         print(f"  Data (hex): {data.hex()}")
         print(f"  Data (bytes): {data}")
+        print(f"  Data (raw): {list(data)}")
         
         # Try to decode as UTF-8 if possible
         try:
@@ -164,7 +181,7 @@ class BLEListener:
             except:
                 pass
         
-        print("-" * 60)
+        print("!" * 60)
     
     async def wait_for_device_ready(self, device_address, max_attempts=10):
         """Wait for device to become discoverable/connectable"""
@@ -234,121 +251,77 @@ class BLEListener:
         print(f"{'='*60}\n")
         
         try:
-            # Increase timeout for devices that need pairing
+            # Connect with minimal operations
+            if self.minimal_mode:
+                print("⚠ Using MINIMAL mode - connect once, minimal operations\n")
+            
             async with BleakClient(device_address, timeout=30.0) as client:
                 self.client = client
                 
                 print(f"✓ Connected successfully!")
                 print(f"  Device: {client.address}")
+                print(f"  Connected: {client.is_connected}")
                 
-                # MTU size may not be available immediately
-                try:
-                    print(f"  MTU Size: {client.mtu_size}")
-                except Exception as e:
-                    print(f"  MTU Size: Could not read ({e})")
-                
-                print("\n⏳ Waiting for connection to stabilize...")
-                await asyncio.sleep(2)  # Give device time to stabilize
-                
+                # If we have specific UUIDs to subscribe to, do it now
                 subscribed_count = 0
+                if self.subscribe_uuids and len(self.subscribe_uuids) > 0:
+                    print(f"\nAttempting to subscribe to {len(self.subscribe_uuids)} UUID(s)...")
+                    for uuid in self.subscribe_uuids:
+                        try:
+                            print(f"  Subscribing to {uuid}...", end=" ")
+                            await client.start_notify(uuid, self.notification_handler)
+                            print("✓")
+                            subscribed_count += 1
+                            await asyncio.sleep(0.2)
+                        except Exception as e:
+                            print(f"✗ ({e})")
                 
-                # Optionally discover and subscribe to services
-                if self.discover_services:
-                    # Get all services and characteristics
-                    print(f"\n{'='*60}")
-                    print("Device Services and Characteristics:")
-                    print(f"{'='*60}\n")
-                    
-                    try:
-                        services = await client.get_services()
-                    except Exception as e:
-                        print(f"⚠ Warning: Could not read all services: {e}")
-                        print("Attempting to continue anyway...\n")
-                        services = []
-                else:
-                    print(f"\n{'='*60}")
-                    print("Skipping service discovery (discover_services=false in config)")
-                    print(f"{'='*60}\n")
-                    services = []
-                
-                for service in services:
-                    try:
-                        print(f"Service UUID: {service.uuid}")
-                        print(f"  Description: {service.description}")
-                        print(f"  Characteristics:")
-                        
-                        for char in service.characteristics:
-                            try:
-                                props = []
-                                if "read" in char.properties:
-                                    props.append("READ")
-                                if "write" in char.properties:
-                                    props.append("WRITE")
-                                if "notify" in char.properties:
-                                    props.append("NOTIFY")
-                                if "indicate" in char.properties:
-                                    props.append("INDICATE")
-                                
-                                print(f"    - UUID: {char.uuid}")
-                                print(f"      Handle: {char.handle}")
-                                print(f"      Properties: {', '.join(props) if props else 'None'}")
-                                
-                                # Subscribe to notifications if available
-                                if "notify" in char.properties:
-                                    try:
-                                        await client.start_notify(char.uuid, self.notification_handler)
-                                        print(f"      ✓ Subscribed to notifications")
-                                        subscribed_count += 1
-                                        await asyncio.sleep(0.1)  # Small delay between subscriptions
-                                    except Exception as e:
-                                        print(f"      ✗ Failed to subscribe: {e}")
-                                
-                                # Subscribe to indications if available
-                                if "indicate" in char.properties:
-                                    try:
-                                        await client.start_notify(char.uuid, self.notification_handler)
-                                        print(f"      ✓ Subscribed to indications")
-                                        subscribed_count += 1
-                                        await asyncio.sleep(0.1)  # Small delay between subscriptions
-                                    except Exception as e:
-                                        print(f"      ✗ Failed to subscribe: {e}")
-                            except Exception as e:
-                                print(f"    ⚠ Error reading characteristic: {e}")
-                        
-                        print()
-                    except Exception as e:
-                        print(f"  ⚠ Error reading service: {e}\n")
-                
-                if subscribed_count == 0:
-                    print("⚠ Warning: No characteristics subscribed. Device may not send notifications.")
-                    print("   This could be normal if device requires specific commands first.\n")
-                
-                print(f"{'='*60}")
-                print("📡 Listening for readings... (Press Ctrl+C to stop)")
+                print(f"\n{'='*60}")
+                print("📡 PASSIVE LISTENING MODE")
                 print(f"{'='*60}\n")
                 
                 if subscribed_count > 0:
-                    print(f"✓ Connection established with {subscribed_count} notification(s) subscribed")
+                    print(f"✓ Subscribed to {subscribed_count} characteristic(s)")
+                    print("  Any data from subscribed characteristics will appear below.\n")
                 else:
-                    print("✓ Connection established (passive listening mode)")
-                    print("   Note: No notifications subscribed - may need device-specific commands")
+                    print("⚠ No characteristics subscribed.")
+                    print("  Connection is idle. Device may not send unsolicited data.\n")
+                    print("  To subscribe to specific UUIDs, add them to config.json:")
+                    print('    "subscribe_uuids": ["00002a52-0000-1000-8000-00805f9b34fb"]\n')
                 
-                print("\nNow you can:")
-                print("  • Take a glucose measurement on your AccuChek")
-                print("  • The reading will automatically appear here (if device sends it)")
-                print("  • Keep this script running to capture measurements")
-                print(f"\n{'='*60}\n")
+                print("Keeping connection alive. Press Ctrl+C to stop.")
+                print("To discover services later, set 'discover_services': true in config\n")
+                print(f"{'='*60}\n")
                 
-                # Keep the connection alive
+                # Just keep connection alive
+                connection_time = 0
+                last_status_time = 0
+                
                 try:
                     while True:
-                        # Check if still connected
                         if not client.is_connected:
-                            print("\n⚠ Device disconnected (may have gone to sleep)")
+                            print(f"\n⚠ Device disconnected after {connection_time} seconds")
+                            print(f"{'='*60}")
+                            print(f"Connection lasted: {connection_time}s")
+                            if connection_time < 5:
+                                print("Very short connection - device likely rejecting connection")
+                            elif connection_time < 30:
+                                print("Connection dropped - device may have timed out")
+                            else:
+                                print("Connection held for a while - good sign!")
+                            print(f"{'='*60}\n")
                             break
+                        
+                        # Show heartbeat every 10 seconds
+                        if connection_time > 0 and connection_time % 10 == 0 and connection_time != last_status_time:
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Still connected ({connection_time}s)")
+                            last_status_time = connection_time
+                        
                         await asyncio.sleep(1)
+                        connection_time += 1
+                        
                 except Exception as e:
-                    print(f"\n⚠ Connection lost: {e}")
+                    print(f"\n⚠ Connection lost after {connection_time}s: {e}")
                     
         except asyncio.CancelledError:
             print("\n\nConnection cancelled by user.")

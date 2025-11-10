@@ -1,8 +1,10 @@
 {
   "mac_address": "80:F5:B5:7F:99:0F",
-  "device_name": "accuchekgit",
+  "device_name": "accuchek",
   "scan_timeout": 10,
   "wait_for_device": true,
-  "discover_services": false
+  "minimal_mode": true,
+  "discover_services": false,
+  "subscribe_uuids": []
 }
 
